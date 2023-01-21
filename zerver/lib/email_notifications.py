@@ -9,6 +9,7 @@ from collections import defaultdict
 from datetime import timedelta
 from email.headerregistry import Address
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from urllib.parse import quote
 
 import lxml.html
 from bs4 import BeautifulSoup
@@ -25,7 +26,7 @@ from zerver.lib.markdown.fenced_code import FENCE_RE
 from zerver.lib.message import bulk_access_messages
 from zerver.lib.notification_data import get_mentioned_user_group_name
 from zerver.lib.queue import queue_json_publish
-from zerver.lib.send_email import FromAddress, send_future_email
+from zerver.lib.send_email import FromAddress, send_future_email, render_email_subject
 from zerver.lib.soft_deactivation import soft_reactivate_if_personal_notification
 from zerver.lib.types import DisplayRecipientT
 from zerver.lib.url_encoding import (
@@ -187,6 +188,7 @@ def build_message_list(
     user: UserProfile,
     messages: List[Message],
     stream_map: Dict[int, Stream],  # only needs id, name
+    subject: str = None
 ) -> List[Dict[str, Any]]:
     """
     Builds the message list object for the message notification email template.
@@ -208,11 +210,12 @@ def build_message_list(
         return re.sub(r"\[(\S*)\]\((\S*)\)", r"\2", content)
 
     def prepend_sender_to_message(
-        message_plain: str, message_html: str, sender: str
+        message: Message, message_plain: str, message_html: str, sender: str
     ) -> Tuple[str, str]:
-        message_plain = f"{sender}:\n{message_plain}"
+        mailto = build_mailto(message)
+        message_plain = f"{sender}:{mailto['plain']}\n{message_plain}"
         message_soup = BeautifulSoup(message_html, "html.parser")
-        sender_name_soup = BeautifulSoup(f"<b>{sender}</b>: ", "html.parser")
+        sender_name_soup = BeautifulSoup(f"<b>{sender}</b>{mailto['html']}: ", "html.parser")
         first_tag = message_soup.find()
         if first_tag and first_tag.name == "div":
             first_tag = first_tag.find()
@@ -241,7 +244,17 @@ def build_message_list(
         fix_spoilers_in_html(fragment, user.default_language)
         html = lxml.html.tostring(fragment, encoding="unicode")
         if sender:
-            plain, html = prepend_sender_to_message(plain, html, sender)
+            plain, html = prepend_sender_to_message(message, plain, html, sender)
+        return {"plain": plain, "html": html}
+
+    def build_mailto(message: Message) -> Dict[str, str]:
+        if message.sender.email_address_is_realm_public():
+            email = quote(message.sender.delivery_email, safe='@')
+            encoded_subject = f'?subject={quote(subject)}' if subject else ''
+            html = f' [<a href="mailto:{email}{encoded_subject}">PM</a>]'
+            plain = f'   (PM: mailto:{email}{encoded_subject})'
+        else:
+            html = plain = ''
         return {"plain": plain, "html": html}
 
     def build_sender_payload(message: Message) -> Dict[str, Any]:
@@ -496,14 +509,16 @@ def do_send_missedmessage_events_reply_in_zulip(
         )
     else:
         context.update(
-            messages=build_message_list(
-                user=user_profile,
-                messages=[m["message"] for m in missed_messages],
-                stream_map={},
-            ),
             sender_str=", ".join(sender.full_name for sender in senders),
             realm_str=user_profile.realm.name,
             show_message_content=True,
+        )
+        subject = render_email_subject("zerver/emails/missed_message", context)
+        context['messages'] = build_message_list(
+            user=user_profile,
+            messages=[m["message"] for m in missed_messages],
+            stream_map={},
+            subject=subject,
         )
 
     # Soft reactivate the long_term_idle user personally mentioned

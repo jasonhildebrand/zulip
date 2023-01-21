@@ -68,6 +68,19 @@ class FromAddress:
             return _("Zulip Account Security")
 
 
+def render_email_subject(
+    template_prefix: str,
+    context: Mapping[str, Any] = {},
+) -> str:
+    return (
+        loader.render_to_string(
+            template_prefix + ".subject.txt", context=context, using="Jinja2_plaintext"
+        )
+        .strip()
+        .replace("\n", "")
+    )
+
+
 def build_email(
     template_prefix: str,
     to_user_ids: Optional[List[int]] = None,
@@ -120,13 +133,7 @@ def build_email(
     }
 
     def render_templates() -> Tuple[str, str, str]:
-        email_subject = (
-            loader.render_to_string(
-                template_prefix + ".subject.txt", context=context, using="Jinja2_plaintext"
-            )
-            .strip()
-            .replace("\n", "")
-        )
+        email_subject = render_email_subject(template_prefix, context)
         message = loader.render_to_string(
             template_prefix + ".txt", context=context, using="Jinja2_plaintext"
         )

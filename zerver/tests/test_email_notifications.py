@@ -428,7 +428,9 @@ class TestMissedMessages(ZulipTestCase):
 
     def normalize_string(self, s: str) -> str:
         s = s.strip()
-        return re.sub(r"\s+", " ", s)
+        s = re.sub(r"\s+", " ", s)
+        s = re.sub(r"\s\(PM:[^)]*\)", "", s)
+        return s
 
     def _get_tokens(self) -> List[str]:
         return ["mm" + str(random.getrandbits(32)) for _ in range(30)]
@@ -1131,21 +1133,27 @@ class TestMissedMessages(ZulipTestCase):
             ],
         )
 
+        def strip_text_mailto(s):
+            return re.sub(r"\s+\(PM:[^)]*\)", "", s)
+
+        def strip_html_mailto(s):
+            return re.sub(r'\s\[<a href="mailto:[^\]]+\]', "", s)
+
         assert isinstance(mail.outbox[0], EmailMultiAlternatives)
         assert isinstance(mail.outbox[0].alternatives[0][0], str)
-        self.assertIn("Iago:\n> @**King Hamlet**\n\n--\nYou are", mail.outbox[0].body)
+        self.assertIn("Iago:\n> @**King Hamlet**\n\n--\nYou are", strip_text_mailto(mail.outbox[0].body))
         # If message content starts with <p> tag the sender name is appended inside the <p> tag.
         self.assertIn(
-            '<p><b>Iago</b>: <span class="user-mention"', mail.outbox[0].alternatives[0][0]
+            '<p><b>Iago</b>: <span class="user-mention"', strip_html_mailto(mail.outbox[0].alternatives[0][0])
         )
 
         assert isinstance(mail.outbox[1], EmailMultiAlternatives)
         assert isinstance(mail.outbox[1].alternatives[0][0], str)
-        self.assertIn("Iago:\n> * 1\n>  *2\n\n--\nYou are receiving", mail.outbox[1].body)
+        self.assertIn("Iago:\n> * 1\n>  *2\n\n--\nYou are receiving", strip_text_mailto(mail.outbox[1].body))
         # If message content does not starts with <p> tag sender name is appended before the <p> tag
         self.assertIn(
             "       <b>Iago</b>: <div><ul>\n<li>1<br/>\n *2</li>\n</ul></div>\n",
-            mail.outbox[1].alternatives[0][0],
+            strip_html_mailto(mail.outbox[1].alternatives[0][0]),
         )
 
         assert isinstance(mail.outbox[2], EmailMultiAlternatives)
@@ -1156,6 +1164,72 @@ class TestMissedMessages(ZulipTestCase):
             ">\n                    \n                        <div><p>Hello</p></div>\n",
             mail.outbox[2].alternatives[0][0],
         )
+
+    def test_pm_link_in_missed_message(self) -> None:
+        hamlet = self.example_user("hamlet")
+        iago = self.example_user('iago')
+        msg_id_1 = self.send_stream_message(
+            iago, "Denmark", "@**King Hamlet**"
+        )
+        msg_id_2 = self.send_stream_message(iago, "Verona", "* 1\n *2")
+        msg_id_3 = self.send_personal_message(iago, hamlet, "Hello")
+
+        handle_missedmessage_emails(
+            hamlet.id,
+            [
+                {"message_id": msg_id_1, "trigger": "mentioned"},
+                {"message_id": msg_id_2, "trigger": "stream_email_notify"},
+                {"message_id": msg_id_3},
+            ],
+        )
+
+        assert isinstance(mail.outbox[0], EmailMultiAlternatives)
+        assert isinstance(mail.outbox[0].alternatives[0][0], str)
+        assert(iago.realm.email_address_visibility == iago.realm.EMAIL_ADDRESS_VISIBILITY_EVERYONE)
+        self.assertIn('Iago:   (PM: mailto:iago@zulip.com?subject=%23Denmark%20%3E%20test)\n> @**King Hamlet**\n\n', mail.outbox[0].body)
+        self.assertIn(
+            '<b>Iago</b> [<a href="mailto:iago@zulip.com?subject=%23Denmark%20%3E%20test">PM</a>]: <span class="user-mention"',
+            mail.outbox[0].alternatives[0][0]
+        )
+
+        assert isinstance(mail.outbox[1], EmailMultiAlternatives)
+        assert isinstance(mail.outbox[1].alternatives[0][0], str)
+        self.assertIn('Iago:   (PM: mailto:iago@zulip.com?subject=%23Verona%20%3E%20test)\n> * 1\n>  *2\n\n', mail.outbox[1].body)
+        self.assertIn(
+            '<b>Iago</b> [<a href="mailto:iago@zulip.com?subject=%23Verona%20%3E%20test">PM</a>]: <div><ul>\n<li>1<br/>\n *2</li>\n</ul></div>\n',
+            mail.outbox[1].alternatives[0][0]
+        )
+
+        assert isinstance(mail.outbox[2], EmailMultiAlternatives)
+        assert isinstance(mail.outbox[2].alternatives[0][0], str)
+
+        # single-user PMs do not get PM links; users can simply reply by email.
+        self.assertNotIn('mailto:iago@zulip.com', mail.outbox[2].body)
+        self.assertNotIn('?subject=', mail.outbox[2].body)
+        self.assertNotIn('mailto:iago@zulip.com', mail.outbox[2].alternatives[0][0])
+        self.assertNotIn('?subject=', mail.outbox[2].alternatives[0][0])
+
+
+    def disabled_test_pm_link_only_for_realm_public_email(self) -> None:
+        realm = self.example_user("iago").realm
+        realm.email_address_visibility = realm.EMAIL_ADDRESS_VISIBILITY_ADMINS
+        realm.save(update_fields=["email_address_visibility"])
+
+        hamlet = self.example_user("hamlet")
+        msg_id_1 = self.send_stream_message(self.example_user("iago"), "Verona", "* 1\n *2")
+        handle_missedmessage_emails(
+            hamlet.id,
+            [ {"message_id": msg_id_1, "trigger": "stream_email_notify"}, ],
+        )
+        assert isinstance(mail.outbox[0], EmailMultiAlternatives)
+        assert isinstance(mail.outbox[0].alternatives[0][0], str)
+
+        # Because realm.email_address_visibility is not EMAIL_ADDRESS_VISIBILITY_EVERYONE, PM links should not be included
+        self.assertNotIn('mailto:iago@zulip.com', mail.outbox[0].body)
+        self.assertNotIn('?subject=', mail.outbox[0].body)
+        self.assertNotIn('mailto:iago@zulip.com', mail.outbox[0].alternatives[0][0])
+        self.assertNotIn('?subject=', mail.outbox[0].alternatives[0][0])
+
 
     def test_multiple_missed_personal_messages(self) -> None:
         hamlet = self.example_user("hamlet")

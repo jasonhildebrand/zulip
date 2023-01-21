@@ -8,6 +8,9 @@
                     {% for message_block in sender_block.content %}
                         {{ message_block.html|safe }}
                     {% endfor %}
+                    {%if mailto in sender_block %}
+                        {{ sender_block.mailto.html|safe }}
+                    {% endif %}
                 </div>
             {% endfor %}
         {% endfor %}
